@@ -1,0 +1,51 @@
+# OpenFMS Cloud Build 简化配置
+# 如果主配置有问题，使用此配置
+
+steps:
+  # 构建 API 镜像
+  - name: 'gcr.io/cloud-builders/docker'
+    args: 
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/openfms-api:$SHORT_SHA'
+      - '-f'
+      - 'api/Dockerfile'
+      - './api'
+
+  # 构建 Web 镜像
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/openfms-web:$SHORT_SHA'
+      - '-f'
+      - 'web/Dockerfile'
+      - './web'
+
+  # 推送镜像
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/openfms-api:$SHORT_SHA']
+  
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/openfms-web:$SHORT_SHA']
+
+  # 部署到 GCE
+  - name: 'gcr.io/cloud-builders/gcloud'
+    args:
+      - 'compute'
+      - 'ssh'
+      - 'openfms-server'
+      - '--zone=asia-east1-a'
+      - '--command='
+      - |
+        cd /home/ubuntu/openfms && 
+        sudo docker pull gcr.io/$PROJECT_ID/openfms-api:$SHORT_SHA &&
+        sudo docker pull gcr.io/$PROJECT_ID/openfms-web:$SHORT_SHA &&
+        sudo docker-compose down &&
+        sudo docker-compose up -d
+
+images:
+  - 'gcr.io/$PROJECT_ID/openfms-api:$SHORT_SHA'
+  - 'gcr.io/$PROJECT_ID/openfms-web:$SHORT_SHA'
+
+timeout: 1800s
