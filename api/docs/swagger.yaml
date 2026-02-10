@@ -1,0 +1,21 @@
+swagger: "2.0"
+info:
+  description: OpenFMS - Open Fleet Management System API
+  title: OpenFMS API
+  contact:
+    name: API Support
+    url: https://github.com/openfms/openfms/issues
+    email: support@openfms.local
+  license:
+    name: Apache 2.0
+    url: http://www.apache.org/licenses/LICENSE-2.0.html
+  version: "1.0"
+host: localhost:3000
+basePath: /api/v1
+paths: {}
+securityDefinitions:
+  BearerAuth:
+    description: Type "Bearer" followed by a space and JWT token.
+    in: header
+    name: Authorization
+    type: apiKey

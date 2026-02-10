@@ -8,17 +8,38 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
 	"openfms/api/internal/config"
-	"openfms/api/internal/handler"
 	"openfms/api/internal/model"
+	"openfms/api/internal/server"
 	"openfms/api/internal/service"
+
+	_ "openfms/api/docs"
 )
+
+// @title OpenFMS API
+// @version 1.0
+// @description OpenFMS - Open Fleet Management System API
+// @termsOfService http://swagger.io/terms/
+
+// @contact.name API Support
+// @contact.url https://github.com/openfms/openfms/issues
+// @contact.email support@openfms.local
+
+// @license.name Apache 2.0
+// @license.url http://www.apache.org/licenses/LICENSE-2.0.html
+
+// @host localhost:3000
+// @BasePath /api/v1
+
+// @securityDefinitions.apikey BearerAuth
+// @in header
+// @name Authorization
+// @description Type "Bearer" followed by a space and JWT token.
 
 func main() {
 	log.Println("[API] Starting OpenFMS API Server...")
@@ -62,71 +83,39 @@ func main() {
 	log.Println("[API] Connected to NATS")
 	defer natsConn.Close()
 
-	// Initialize services
-	authService := service.NewAuthService(db)
-	deviceService := service.NewDeviceService(db, redisClient, natsConn)
-	positionService := service.NewPositionService(db, redisClient)
+	// Create and setup server
+	srv := server.NewServer(cfg, db, redisClient, natsConn)
+	srv.Setup()
 
-	// Initialize handlers
-	authHandler := handler.NewAuthHandler(authService, cfg)
-	deviceHandler := handler.NewDeviceHandler(deviceService)
-	positionHandler := handler.NewPositionHandler(positionService)
+	// Start NATS consumers for non-WS messages
+	go startNATSConsumers(natsConn)
 
-	// Setup Gin router
-	router := gin.Default()
-
-	// CORS middleware
-	router.Use(func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization")
-		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(204)
-			return
-		}
-		c.Next()
-	})
-
-	// Public routes
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "ok"})
-	})
-	router.POST("/api/v1/auth/login", authHandler.Login)
-
-	// Protected routes
-	api := router.Group("/api/v1")
-	api.Use(authHandler.AuthMiddleware())
-	{
-		// Auth
-		api.GET("/auth/me", authHandler.GetMe)
-
-		// Devices
-		api.GET("/devices", deviceHandler.List)
-		api.POST("/devices", deviceHandler.Create)
-		api.GET("/devices/:id", deviceHandler.Get)
-		api.PUT("/devices/:id", deviceHandler.Update)
-		api.DELETE("/devices/:id", deviceHandler.Delete)
-		api.GET("/devices/:device_id/shadow", deviceHandler.GetShadow)
-		api.POST("/devices/:device_id/commands", deviceHandler.SendCommand)
-
-		// Positions
-		api.GET("/positions/latest", positionHandler.GetAllLatest)
-		api.GET("/devices/:device_id/positions", positionHandler.GetHistory)
-		api.GET("/devices/:device_id/positions/latest", positionHandler.GetLatest)
+	// Start geofence checker
+	geofenceChecker := service.NewGeofenceChecker(db, redisClient, natsConn)
+	if err := geofenceChecker.Start(); err != nil {
+		log.Fatalf("[API] Failed to start geofence checker: %v", err)
 	}
+	srv.SetGeofenceChecker(geofenceChecker)
+	log.Println("[API] Geofence checker started")
 
-	// Start NATS consumers
-	go startNATSConsumers(natsConn, positionService, deviceService)
+	// Start alarm service
+	// Note: Get WSHub from server to pass to alarm service
+	alarmService := service.NewAlarmService(db, natsConn, srv.GetWSHub())
+	if err := alarmService.Start(); err != nil {
+		log.Fatalf("[API] Failed to start alarm service: %v", err)
+	}
+	srv.SetAlarmService(alarmService)
+	log.Println("[API] Alarm service started")
 
 	// Start HTTP server
 	addr := ":3000"
-	log.Printf("[API] HTTP server listening on %s", addr)
-
 	go func() {
-		if err := router.Run(addr); err != nil {
+		if err := srv.Run(addr); err != nil {
 			log.Fatalf("[API] Failed to start server: %v", err)
 		}
 	}()
+
+	log.Printf("[API] Server ready on %s", addr)
 
 	// Wait for interrupt signal
 	sigChan := make(chan os.Signal, 1)
@@ -134,6 +123,10 @@ func main() {
 
 	<-sigChan
 	log.Println("[API] Shutting down...")
+
+	// Graceful shutdown
+	srv.Shutdown()
+	log.Println("[API] Server stopped")
 }
 
 func autoMigrate(db *gorm.DB) error {
@@ -143,19 +136,25 @@ func autoMigrate(db *gorm.DB) error {
 		&model.Vehicle{},
 		&model.Position{},
 		&model.Geofence{},
+		&model.GeofenceDevice{},
+		&model.GeofenceEvent{},
+		&model.DeviceGeofenceState{},
+		&model.Alarm{},
+		&model.AlarmRule{},
+		&model.Role{},
+		&model.Permission{},
+		&model.RolePermission{},
+		&model.UserRole{},
 	)
 }
 
-func startNATSConsumers(nc *nats.Conn, positionService *service.PositionService, deviceService *service.DeviceService) {
-	// Subscribe to location updates
-	nc.Subscribe("fms.uplink.LOCATION", func(msg *nats.Msg) {
-		// Parse and save position
-		log.Printf("[API] Received location update")
-		// TODO: Parse message and save to database
+func startNATSConsumers(nc *nats.Conn) {
+	// Subscribe to all uplink messages for logging/debugging
+	nc.Subscribe("fms.uplink.all", func(msg *nats.Msg) {
+		log.Printf("[NATS] Received message: %s", string(msg.Data))
 	})
 
-	nc.Subscribe("fms.uplink.all", func(msg *nats.Msg) {
-		// Log all messages for debugging
-		log.Printf("[API] Received message: %s", string(msg.Data))
-	})
+	// Note: Location messages are now handled by WebSocket hub
+	// Additional consumers can be added here for other message types
+	log.Println("[NATS] Consumers started")
 }

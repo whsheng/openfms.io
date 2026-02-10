@@ -1,0 +1,310 @@
+# OpenFMS Cloud Build 配置文件
+# 自动化构建和部署到 Google Compute Engine
+
+steps:
+  # 步骤 1: 构建 API 服务
+  - name: 'gcr.io/cloud-builders/docker'
+    args: 
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/openfms-api:$SHORT_SHA'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/openfms-api:latest'
+      - '-f'
+      - 'api/Dockerfile'
+      - 'api/'
+    id: 'build-api'
+
+  # 步骤 2: 构建 Web 前端
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/openfms-web:$SHORT_SHA'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/openfms-web:latest'
+      - '-f'
+      - 'web/Dockerfile'
+      - 'web/'
+    id: 'build-web'
+
+  # 步骤 3: 推送镜像到 Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/openfms-api:$SHORT_SHA']
+    waitFor: ['build-api']
+    id: 'push-api'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/openfms-web:$SHORT_SHA']
+    waitFor: ['build-web']
+    id: 'push-web'
+
+  # 步骤 4: 准备部署包
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "准备部署配置..."
+        # 创建生产环境配置
+        cat > docker-compose.prod.yml << 'EOF'
+        version: '3.8'
+        
+        services:
+          api:
+            image: gcr.io/$PROJECT_ID/openfms-api:$SHORT_SHA
+            container_name: openfms-api
+            restart: unless-stopped
+            ports:
+              - "3000:3000"
+            environment:
+              - DATABASE_URL=postgres://postgres:postgres@postgres:5432/openfms?sslmode=disable
+              - REDIS_URL=redis:6379
+              - NATS_URL=nats://nats:4222
+              - JWT_SECRET=${_JWT_SECRET}
+              - ENV=production
+            depends_on:
+              - postgres
+              - redis
+              - nats
+            networks:
+              - openfms-network
+        
+          web:
+            image: gcr.io/$PROJECT_ID/openfms-web:$SHORT_SHA
+            container_name: openfms-web
+            restart: unless-stopped
+            ports:
+              - "80:80"
+            environment:
+              - VITE_API_URL=http://localhost:3000
+            depends_on:
+              - api
+            networks:
+              - openfms-network
+        
+          postgres:
+            image: timescale/timescaledb:latest-pg15
+            container_name: openfms-postgres
+            restart: unless-stopped
+            ports:
+              - "5432:5432"
+            environment:
+              - POSTGRES_USER=postgres
+              - POSTGRES_PASSWORD=postgres
+              - POSTGRES_DB=openfms
+            volumes:
+              - postgres_data:/var/lib/postgresql/data
+            networks:
+              - openfms-network
+        
+          redis:
+            image: redis:7-alpine
+            container_name: openfms-redis
+            restart: unless-stopped
+            ports:
+              - "6379:6379"
+            volumes:
+              - redis_data:/data
+            networks:
+              - openfms-network
+        
+          nats:
+            image: nats:latest
+            container_name: openfms-nats
+            restart: unless-stopped
+            ports:
+              - "4222:4222"
+              - "8222:8222"
+            command: "-m 8222"
+            networks:
+              - openfms-network
+        
+          prometheus:
+            image: prom/prometheus:latest
+            container_name: openfms-prometheus
+            restart: unless-stopped
+            ports:
+              - "9090:9090"
+            volumes:
+              - ./configs/prometheus.yml:/etc/prometheus/prometheus.yml
+              - prometheus_data:/prometheus
+            networks:
+              - openfms-network
+        
+          grafana:
+            image: grafana/grafana:latest
+            container_name: openfms-grafana
+            restart: unless-stopped
+            ports:
+              - "3001:3000"
+            environment:
+              - GF_SECURITY_ADMIN_USER=admin
+              - GF_SECURITY_ADMIN_PASSWORD=admin
+              - GF_USERS_ALLOW_SIGN_UP=false
+            volumes:
+              - grafana_data:/var/lib/grafana
+            networks:
+              - openfms-network
+        
+        volumes:
+          postgres_data:
+          redis_data:
+          prometheus_data:
+          grafana_data:
+        
+        networks:
+          openfms-network:
+            driver: bridge
+        EOF
+        
+        echo "配置文件准备完成"
+    id: 'prepare-config'
+
+  # 步骤 5: 部署到 GCE 实例
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "开始部署到 GCE..."
+        
+        INSTANCE_NAME=${_INSTANCE_NAME}
+        ZONE=${_ZONE}
+        
+        # 检查实例是否存在
+        if ! gcloud compute instances describe $$INSTANCE_NAME --zone=$$ZONE --quiet 2>/dev/null; then
+          echo "创建 GCE 实例..."
+          gcloud compute instances create $$INSTANCE_NAME \
+            --machine-type=${_MACHINE_TYPE} \
+            --image-family=ubuntu-2204-lts \
+            --image-project=ubuntu-os-cloud \
+            --boot-disk-size=${_DISK_SIZE} \
+            --boot-disk-type=pd-ssd \
+            --tags=http-server,https-server,openfms \
+            --zone=$$ZONE \
+            --metadata startup-script='#!/bin/bash
+              apt-get update
+              apt-get install -y docker.io docker-compose
+              systemctl start docker
+              systemctl enable docker
+            '
+        else
+          echo "实例已存在，准备更新..."
+        fi
+        
+        # 等待实例就绪
+        echo "等待实例就绪..."
+        for i in {1..30}; do
+          if gcloud compute ssh $$INSTANCE_NAME --zone=$$ZONE --command="echo 'ready'" --quiet 2>/dev/null; then
+            break
+          fi
+          echo "等待中... ($$i/30)"
+          sleep 2
+        done
+        
+        # 上传配置文件和脚本
+        echo "上传部署文件..."
+        gcloud compute scp docker-compose.prod.yml $$INSTANCE_NAME:~/ --zone=$$ZONE --quiet
+        gcloud compute scp -r configs/ $$INSTANCE_NAME:~/ --zone=$$ZONE --quiet || true
+        
+        # 在实例上执行部署
+        echo "在实例上执行部署..."
+        gcloud compute ssh $$INSTANCE_NAME --zone=$$ZONE --command="
+          # 安装 Docker（如果还没有）
+          if ! command -v docker &> /dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y docker.io docker-compose
+            sudo systemctl start docker
+            sudo systemctl enable docker
+            sudo usermod -aG docker \$USER
+          fi
+          
+          # 登录 Google Container Registry
+          gcloud auth configure-docker --quiet
+          
+          # 停止旧服务
+          if [ -f docker-compose.prod.yml ]; then
+            sudo docker-compose -f docker-compose.prod.yml down || true
+          fi
+          
+          # 拉取最新镜像
+          sudo docker pull gcr.io/$PROJECT_ID/openfms-api:$SHORT_SHA
+          sudo docker pull gcr.io/$PROJECT_ID/openfms-web:$SHORT_SHA
+          
+          # 更新 docker-compose 使用新镜像
+          sed -i 's|image: gcr.io/.*/openfms-api:.*|image: gcr.io/$PROJECT_ID/openfms-api:$SHORT_SHA|' docker-compose.prod.yml
+          sed -i 's|image: gcr.io/.*/openfms-web:.*|image: gcr.io/$PROJECT_ID/openfms-web:$SHORT_SHA|' docker-compose.prod.yml
+          
+          # 启动服务
+          sudo docker-compose -f docker-compose.prod.yml up -d
+          
+          # 清理旧镜像
+          sudo docker image prune -f
+          
+          echo '部署完成'
+        "
+        
+        # 获取外部 IP
+        EXTERNAL_IP=\$(gcloud compute instances describe $$INSTANCE_NAME --zone=$$ZONE --format='get(networkInterfaces[0].accessConfigs[0].natIP)' --quiet)
+        
+        echo ""
+        echo "========================================"
+        echo "部署完成！"
+        echo "========================================"
+        echo "访问地址:"
+        echo "  Web: http://\$$EXTERNAL_IP"
+        echo "  API: http://\$$EXTERNAL_IP:3000"
+        echo "  Swagger: http://\$$EXTERNAL_IP:3000/swagger/index.html"
+        echo "========================================"
+    id: 'deploy-to-gce'
+
+  # 步骤 6: 健康检查
+  - name: 'gcr.io/cloud-builders/curl'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "等待服务启动..."
+        sleep 60
+        
+        INSTANCE_NAME=${_INSTANCE_NAME}
+        ZONE=${_ZONE}
+        EXTERNAL_IP=$(gcloud compute instances describe $$INSTANCE_NAME --zone=$$ZONE --format='get(networkInterfaces[0].accessConfigs[0].natIP)' --quiet)
+        
+        echo "健康检查: http://$$EXTERNAL_IP:3000/health"
+        
+        for i in {1..10}; do
+          if curl -s http://$$EXTERNAL_IP:3000/health | grep -q "ok"; then
+            echo "✓ 健康检查通过"
+            exit 0
+          fi
+          echo "等待服务就绪... ($$i/10)"
+          sleep 10
+        done
+        
+        echo "✗ 健康检查失败"
+        exit 1
+    id: 'health-check'
+
+# 替代变量（在触发器中配置）
+substitutions:
+  _INSTANCE_NAME: openfms-server
+  _ZONE: asia-east1-a
+  _MACHINE_TYPE: e2-medium
+  _DISK_SIZE: 100GB
+  _JWT_SECRET: openfms-secret-key-change-this-in-production
+
+# 镜像存储
+images:
+  - 'gcr.io/$PROJECT_ID/openfms-api:$SHORT_SHA'
+  - 'gcr.io/$PROJECT_ID/openfms-api:latest'
+  - 'gcr.io/$PROJECT_ID/openfms-web:$SHORT_SHA'
+  - 'gcr.io/$PROJECT_ID/openfms-web:latest'
+
+# 超时时间
+timeout: 1800s  # 30分钟
+
+# 选项
+options:
+  logging: CLOUD_LOGGING_ONLY

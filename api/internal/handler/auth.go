@@ -23,6 +23,16 @@ func NewAuthHandler(authService *service.AuthService, cfg *config.Config) *AuthH
 }
 
 // Login handles user login
+// @Summary User login
+// @Description Authenticate user and return JWT token
+// @Tags Auth
+// @Accept json
+// @Produce json
+// @Param request body model.LoginRequest true "Login credentials"
+// @Success 200 {object} model.LoginResponse
+// @Failure 400 {object} map[string]string
+// @Failure 401 {object} map[string]string
+// @Router /auth/login [post]
 func (h *AuthHandler) Login(c *gin.Context) {
 	var req model.LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -57,6 +67,15 @@ func (h *AuthHandler) Login(c *gin.Context) {
 }
 
 // GetMe returns current user info
+// @Summary Get current user
+// @Description Get information about the currently authenticated user
+// @Tags Auth
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Success 200 {object} model.User
+// @Failure 401 {object} map[string]string
+// @Router /auth/me [get]
 func (h *AuthHandler) GetMe(c *gin.Context) {
 	user, exists := c.Get("user")
 	if !exists {

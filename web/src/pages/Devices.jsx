@@ -1,12 +1,14 @@
 import React, { useEffect, useState } from 'react'
 import { Table, Button, Space, Tag, Modal, Form, Input, Select, message, Popconfirm } from 'antd'
-import { PlusOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons'
+import { PlusOutlined, EditOutlined, DeleteOutlined, UploadOutlined, DownloadOutlined } from '@ant-design/icons'
 import { deviceApi } from '../services/api'
+import DeviceImportModal from '../components/DeviceImportModal'
 
 function Devices() {
   const [devices, setDevices] = useState([])
   const [loading, setLoading] = useState(false)
   const [modalVisible, setModalVisible] = useState(false)
+  const [importModalVisible, setImportModalVisible] = useState(false)
   const [editingDevice, setEditingDevice] = useState(null)
   const [form] = Form.useForm()
   const [pagination, setPagination] = useState({
@@ -22,7 +24,7 @@ function Devices() {
   const fetchDevices = async () => {
     setLoading(true)
     try {
-      const res = await deviceApi.getDevices({
+      const res = await deviceApi.getList({
         page: pagination.current,
         page_size: pagination.pageSize,
       })
@@ -49,7 +51,7 @@ function Devices() {
 
   const handleDelete = async (id) => {
     try {
-      await deviceApi.deleteDevice(id)
+      await deviceApi.delete(id)
       message.success('删除成功')
       fetchDevices()
     } catch (error) {
@@ -60,10 +62,10 @@ function Devices() {
   const handleSubmit = async (values) => {
     try {
       if (editingDevice) {
-        await deviceApi.updateDevice(editingDevice.id, values)
+        await deviceApi.update(editingDevice.id, values)
         message.success('更新成功')
       } else {
-        await deviceApi.createDevice(values)
+        await deviceApi.create(values)
         message.success('创建成功')
       }
       setModalVisible(false)
@@ -71,6 +73,10 @@ function Devices() {
     } catch (error) {
       message.error(editingDevice ? '更新失败' : '创建失败')
     }
+  }
+
+  const handleImportSuccess = () => {
+    fetchDevices()
   }
 
   const columns = [
@@ -132,11 +138,16 @@ function Devices() {
 
   return (
     <div>
-      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between' }}>
+      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h2>设备管理</h2>
-        <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>
-          添加设备
-        </Button>
+        <Space>
+          <Button icon={<DownloadOutlined />} onClick={() => setImportModalVisible(true)}>
+            批量导入
+          </Button>
+          <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>
+            添加设备
+          </Button>
+        </Space>
       </div>
 
       <Table
@@ -186,6 +197,12 @@ function Devices() {
           </Form.Item>
         </Form>
       </Modal>
+
+      <DeviceImportModal
+        visible={importModalVisible}
+        onCancel={() => setImportModalVisible(false)}
+        onSuccess={handleImportSuccess}
+      />
     </div>
   )
 }

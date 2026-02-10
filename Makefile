@@ -1,7 +1,15 @@
-.PHONY: all build run stop clean dev test
+.PHONY: all build run stop clean dev test swagger swagger-init
 
 # Default target
 all: build
+
+# Install swagger tool
+swagger-init:
+	go install github.com/swaggo/swag/cmd/swag@latest
+
+# Generate swagger docs
+swagger:
+	cd api && swag init -g cmd/api/main.go -o docs
 
 # Build all services
 build:

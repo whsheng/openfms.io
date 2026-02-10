@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -13,15 +14,17 @@ import (
 
 // PositionService handles position business logic
 type PositionService struct {
-	db    *gorm.DB
-	redis *redis.Client
+	db         *gorm.DB
+	redis      *redis.Client
+	jetstream  *JetStreamService
 }
 
 // NewPositionService creates a new position service
-func NewPositionService(db *gorm.DB, redisClient *redis.Client) *PositionService {
+func NewPositionService(db *gorm.DB, redisClient *redis.Client, jetstream *JetStreamService) *PositionService {
 	return &PositionService{
-		db:    db,
-		redis: redisClient,
+		db:        db,
+		redis:     redisClient,
+		jetstream: jetstream,
 	}
 }
 
@@ -83,5 +86,66 @@ func (s *PositionService) GetAllLatest(ctx context.Context) ([]model.Position, e
 
 // SavePosition saves a position record
 func (s *PositionService) SavePosition(ctx context.Context, position *model.Position) error {
-	return s.db.Create(position).Error
+	// Save to database
+	if err := s.db.Create(position).Error; err != nil {
+		return err
+	}
+
+	// Publish to JetStream for persistence and replay
+	if s.jetstream != nil && s.jetstream.IsEnabled() {
+		extras, _ := json.Marshal(position.Extras)
+		locMsg := &LocationMessage{
+			ID:        fmt.Sprintf("%d", position.ID),
+			DeviceID:  position.DeviceID,
+			Lat:       position.Lat,
+			Lon:       position.Lon,
+			Speed:     position.Speed,
+			Direction: position.Direction,
+			Altitude:  position.Altitude,
+			Timestamp: position.Time,
+			Extras:    extras,
+		}
+
+		if err := s.jetstream.PublishLocation(ctx, locMsg); err != nil {
+			// Log error but don't fail the save operation
+			fmt.Printf("[PositionService] Failed to publish location to JetStream: %v\n", err)
+		}
+	}
+
+	return nil
+}
+
+// ReplayLocations replays location messages from JetStream within a time range
+func (s *PositionService) ReplayLocations(ctx context.Context, deviceID string, start, end time.Time, batchSize int) ([]*LocationMessage, bool, error) {
+	if s.jetstream == nil || !s.jetstream.IsEnabled() {
+		return nil, false, fmt.Errorf("JetStream is not enabled")
+	}
+
+	return s.jetstream.ReplayLocations(ctx, deviceID, start, end, batchSize)
+}
+
+// GetLocationStats returns statistics about the location stream
+func (s *PositionService) GetLocationStats() (map[string]interface{}, error) {
+	if s.jetstream == nil || !s.jetstream.IsEnabled() {
+		return map[string]interface{}{
+			"enabled": false,
+		}, nil
+	}
+
+	info, err := s.jetstream.GetStreamInfo(StreamLocations)
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"enabled":     true,
+		"stream":      info.Config.Name,
+		"subjects":    info.Config.Subjects,
+		"state":       info.State,
+		"created":     info.Created,
+		"max_age":     info.Config.MaxAge,
+		"max_bytes":   info.Config.MaxBytes,
+		"storage":     info.Config.Storage,
+		"replicas":    info.Config.Replicas,
+	}, nil
 }

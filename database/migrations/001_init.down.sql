@@ -1,0 +1,5 @@
+-- 回滚初始迁移
+
+DROP TABLE IF EXISTS positions;
+DROP TABLE IF EXISTS devices;
+DROP TABLE IF EXISTS users;

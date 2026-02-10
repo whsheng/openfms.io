@@ -1,0 +1,40 @@
+.userList,
+.roleList {
+  padding: 16px;
+}
+
+.userName {
+  font-weight: 500;
+  font-size: 14px;
+}
+
+.userUsername {
+  font-size: 12px;
+  color: #8c8c8c;
+}
+
+.form-footer {
+  margin-bottom: 0;
+  margin-top: 24px;
+  text-align: right;
+}
+
+.permissionTree {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.permissionGroup {
+  margin-bottom: 16px;
+}
+
+.permissionGroupTitle {
+  font-weight: 500;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.permissionItem {
+  margin-left: 16px;
+}

@@ -1,0 +1,72 @@
+# GitHub Actions Workflow
+# 触发 Google Cloud Build 部署
+
+name: Deploy to Google Cloud
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  INSTANCE_NAME: openfms-server
+  ZONE: asia-east1-a
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Setup Google Cloud SDK
+      uses: google-github-actions/setup-gcloud@v1
+      with:
+        project_id: ${{ secrets.GCP_PROJECT_ID }}
+        service_account_key: ${{ secrets.GCP_SA_KEY }}
+        export_default_credentials: true
+
+    - name: Trigger Cloud Build
+      run: |
+        echo "Triggering Cloud Build..."
+        gcloud builds submit --config=cloudbuild.yaml \
+          --substitutions=_INSTANCE_NAME=$INSTANCE_NAME,_ZONE=$ZONE,_JWT_SECRET=${{ secrets.JWT_SECRET }}
+
+    - name: Get Instance IP
+      run: |
+        EXTERNAL_IP=$(gcloud compute instances describe $INSTANCE_NAME \
+          --zone=$ZONE \
+          --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
+        echo "EXTERNAL_IP=$EXTERNAL_IP" >> $GITHUB_ENV
+        echo "Deployed to: http://$EXTERNAL_IP"
+
+    - name: Health Check
+      run: |
+        echo "Waiting for services to start..."
+        sleep 60
+        
+        for i in {1..10}; do
+          if curl -s http://${{ env.EXTERNAL_IP }}:3000/health | grep -q "ok"; then
+            echo "✓ Health check passed"
+            exit 0
+          fi
+          echo "Waiting... ($i/10)"
+          sleep 10
+        done
+        
+        echo "✗ Health check failed"
+        exit 1
+
+    - name: Deployment Summary
+      run: |
+        echo "========================================"
+        echo "Deployment Complete!"
+        echo "========================================"
+        echo "Web: http://${{ env.EXTERNAL_IP }}"
+        echo "API: http://${{ env.EXTERNAL_IP }}:3000"
+        echo "Swagger: http://${{ env.EXTERNAL_IP }}:3000/swagger/index.html"
+        echo "Grafana: http://${{ env.EXTERNAL_IP }}:3001"
+        echo "========================================"

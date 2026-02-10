@@ -1,6 +1,6 @@
-import React from 'react'
+import React, { useState, useEffect } from 'react'
 import { Outlet, useNavigate, useLocation } from 'react-router-dom'
-import { Layout as AntLayout, Menu, Avatar, Dropdown, Space } from 'antd'
+import { Layout as AntLayout, Menu, Avatar, Dropdown, Space, Badge } from 'antd'
 import {
   DashboardOutlined,
   CarOutlined,
@@ -9,8 +9,14 @@ import {
   SettingOutlined,
   UserOutlined,
   LogoutOutlined,
+  EnvironmentOutlined,
+  BorderOutlined,
+  BellOutlined,
+  TeamOutlined,
+  SafetyOutlined,
 } from '@ant-design/icons'
 import { useAuthStore } from '../stores/auth'
+import { alarmApi } from '../services/alarm'
 
 const { Header, Sider, Content } = AntLayout
 
@@ -18,6 +24,24 @@ function Layout() {
   const navigate = useNavigate()
   const location = useLocation()
   const { user, logout } = useAuthStore()
+  const [unreadCount, setUnreadCount] = useState(0)
+
+  // Fetch unread count periodically
+  useEffect(() => {
+    const fetchUnreadCount = async () => {
+      try {
+        const response = await alarmApi.getUnreadCount()
+        setUnreadCount(response.data.unread_count || 0)
+      } catch (error) {
+        // Ignore errors
+      }
+    }
+
+    fetchUnreadCount()
+    const interval = setInterval(fetchUnreadCount, 30000) // Every 30 seconds
+
+    return () => clearInterval(interval)
+  }, [])
 
   const menuItems = [
     {
@@ -28,12 +52,48 @@ function Layout() {
     {
       key: '/map',
       icon: <GlobalOutlined />,
-      label: '实时监控',
+      label: '实时地图',
+    },
+    {
+      key: '/monitor',
+      icon: <EnvironmentOutlined />,
+      label: '车辆监控',
     },
     {
       key: '/devices',
       icon: <CarOutlined />,
       label: '设备管理',
+    },
+    {
+      key: '/geofences',
+      icon: <BorderOutlined />,
+      label: '电子围栏',
+    },
+    {
+      key: '/alarms',
+      icon: (
+        <Badge count={unreadCount} size="small" offset={[5, -5]}>
+          <BellOutlined />
+        </Badge>
+      ),
+      label: '报警中心',
+    },
+    {
+      key: 'user-management',
+      icon: <TeamOutlined />,
+      label: '用户管理',
+      children: [
+        {
+          key: '/users',
+          icon: <UserOutlined />,
+          label: '用户列表',
+        },
+        {
+          key: '/roles',
+          icon: <SafetyOutlined />,
+          label: '角色权限',
+        },
+      ],
     },
     {
       key: '/history',
@@ -116,10 +176,9 @@ function Layout() {
           </Dropdown>
         </Header>
         <Content style={{ 
-          margin: 24, 
-          padding: 24, 
-          background: '#fff',
-          borderRadius: 8,
+          margin: 0, 
+          padding: 0, 
+          background: '#f0f2f5',
           minHeight: 280
         }}>
           <Outlet />

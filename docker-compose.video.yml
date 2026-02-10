@@ -1,0 +1,65 @@
+# OpenFMS v1.2 - 视频服务扩展配置
+# 与主 docker-compose.yml 配合使用
+
+version: '3.8'
+
+services:
+  # ZLMediaKit 流媒体服务器
+  zlmediakit:
+    image: panjjo/zlmediakit:latest
+    container_name: openfms-zlmediakit
+    restart: unless-stopped
+    ports:
+      - "554:554/tcp"      # RTSP
+      - "554:554/udp"      # RTSP UDP
+      - "1935:1935/tcp"    # RTMP
+      - "8088:80/tcp"      # HTTP (FLV/HLS)
+      - "8443:443/tcp"     # HTTPS
+      - "10000-10300:10000-10300/udp"  # WebRTC UDP
+    volumes:
+      - ./configs/zlmediakit.ini:/opt/media/conf/config.ini
+      - ./data/record:/opt/media/bin/www/record  # 录像存储
+    environment:
+      - TZ=Asia/Shanghai
+    networks:
+      - openfms-network
+
+  # 视频网关服务 (JT1078协议适配)
+  video-gateway:
+    build:
+      context: ./video-gateway
+      dockerfile: Dockerfile
+    container_name: openfms-video-gateway
+    restart: unless-stopped
+    ports:
+      - "8090:8090/tcp"    # TCP 端口 (JT1078)
+      - "8091:8091/tcp"    # HTTP 管理接口
+    environment:
+      - NATS_URL=nats://nats:4222
+      - REDIS_URL=redis:6379
+      - ZLMEDIA_URL=http://zlmediakit:80
+      - TZ=Asia/Shanghai
+    depends_on:
+      - nats
+      - redis
+      - zlmediakit
+    networks:
+      - openfms-network
+
+  # 录像清理定时任务
+  record-cleaner:
+    image: alpine:latest
+    container_name: openfms-record-cleaner
+    restart: unless-stopped
+    volumes:
+      - ./data/record:/record
+      - ./scripts/clean-records.sh:/clean-records.sh
+    command: >
+      sh -c "echo '0 2 * * * /clean-records.sh' | crontab - && crond -f"
+    networks:
+      - openfms-network
+
+networks:
+  openfms-network:
+    external: true
+    name: openfms_openfms-network
